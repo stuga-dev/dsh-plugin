@@ -1,0 +1,34 @@
+# @stuga/dsh-plugin — the configuration layer a DeepSeek Harness profile gets
+# when this plugin is installed (`dsh plugin --profile web add @stuga/dsh-plugin`).
+#
+# Two rows:
+#   stuga-mcp       the in-box MCP client pointed at the Stuga node's /mcp
+#   stuga-guidance  this package: a system-prompt section + playbook skills
+#
+# Connection settings come from the launch environment or $DSH_HOME/.env:
+#   STUGA_URL      origin of the Stuga node (default http://127.0.0.1:8787)
+#   STUGA_API_KEY  an agent key (vk_…) minted in Stuga under Settings → Your own AI
+#
+# Override either row by id in $DSH_HOME/profiles/<name>/cordis.patch.yml —
+# a patch replaces the whole `config` of a row, so restate every key.
+- insert:
+    - id: stuga-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: stuga
+        transport: streamable-http
+        url: !!js '(process.env.STUGA_URL ?? "http://127.0.0.1:8787").replace(/\/+$/, "") + "/mcp"'
+        headers:
+          Authorization: !!js '"Bearer " + (process.env.STUGA_API_KEY ?? "")'
+          # Labels for Stuga's review inbox: which client a run came through, and
+          # (when you pin one) which model drove it. dsh does not expose the running
+          # model to the MCP layer, so the model label is yours to set.
+          x-stuga-client: deepseek-harness
+          x-stuga-model: !!js 'process.env.STUGA_MODEL ?? ""'
+        # Keep the harness booting when the node is down; tools appear on reconnect.
+        failOnStartupError: false
+    - id: stuga-guidance
+      name: '@stuga/dsh-plugin'
+      config:
+        url: !!js 'process.env.STUGA_URL ?? "http://127.0.0.1:8787"'
+        serverName: stuga
