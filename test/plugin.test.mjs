@@ -8,6 +8,40 @@ import * as plugin from "../index.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * Stuga's MCP tools and their action enums, verbatim from stuga's
+ * packages/agent-surface/src/catalog.ts (MCP_CONTRACT_VERSION 2).
+ */
+const CONTRACT_TOOLS = {
+  workspaces: ["list", "instructions"],
+  docs: ["list", "metadata"],
+  search: [],
+  markdown: ["read", "status", "provenance"],
+  comments: [],
+  folders: [],
+  events: [],
+  collections: ["list", "open"],
+  retrieve: [],
+  databases: ["list", "schema", "status", "page"],
+  query: [],
+  docs_create: [],
+  markdown_append: [],
+  markdown_edit: ["write", "str_replace", "cited_edits"],
+  comments_add: [],
+  media_upload: ["upload", "upload_from_url"],
+  collections_edit: ["create", "rename", "delete", "add_items", "remove_items"],
+  databases_add: ["create_database", "create_table", "add_column", "insert_rows", "import", "start_import", "create_view", "open_page"],
+  databases_change: ["update_rows", "delete_rows", "update_view"],
+};
+const CONTRACT_ACTIONS = new Set(Object.values(CONTRACT_TOOLS).flat());
+
+/** Every tool named with its `mcp__<server>__` prefix, and every action named as `action: "x"` or `action "x"`. */
+function namedToolsAndActions(text) {
+  const tools = [...text.matchAll(/mcp__(?:\{\{SERVER\}\}|stuga)__(\w+)/g)].map((m) => m[1]);
+  const actions = [...text.matchAll(/action:? "(\w+)"/g)].map((m) => m[1]);
+  return { tools, actions };
+}
+
 function fakeCtx() {
   const calls = { sections: [], skills: [], effects: [] };
   return {
@@ -69,7 +103,8 @@ test("apply registers one section and the three bundled skills", () => {
   // The text is a provider so a later conventions fetch reaches the next request.
   assert.equal(typeof section.text, "function");
   const text = section.text({});
-  assert.match(text, /mcp__stuga__markdown/);
+  assert.match(text, /mcp__stuga__markdown_edit/);
+  assert.match(text, /`workspace_ids` instead, where \["\*"\] covers every workspace this key reaches/);
   assert.match(text, /"Proposed" is SUCCESS/);
   assert.match(text, /https:\/\/notes\.example\.com\/review/);
   assert.doesNotMatch(text, /example\.com\/\/doc/, "trailing slash is normalized away");
@@ -103,22 +138,46 @@ test("parseSkillFile reads frontmatter and body", () => {
   assert.equal(bare.content, "no frontmatter");
 });
 
-test("skill names match their directories and use the action verbs Stuga ships", async () => {
+test("skill names match their directories and use the tools and actions Stuga ships", async () => {
   const skills = await plugin.loadBundledSkills(path.join(ROOT, "skills"));
   assert.deepEqual(
     skills.map((s) => s.name),
     ["stuga-databases", "stuga-propose-edits", "stuga-research"],
   );
   const byName = Object.fromEntries(skills.map((s) => [s.name, s.content]));
-  // Verbatim action enums from stuga's packages/agent-surface/src/catalog.ts.
-  for (const action of ["read", "write", "str_replace", "append", "status", "provenance"]) {
-    assert.match(byName["stuga-propose-edits"], new RegExp(`"${action}"`), `markdown action ${action}`);
+  const mentions = (skill, tool) => assert.match(byName[skill], new RegExp(`\`${tool}\``), `${skill} names ${tool}`);
+  const usesAction = (skill, action) => assert.match(byName[skill], new RegExp(`action:? "${action}"`), `${skill} uses action ${action}`);
+
+  for (const tool of ["markdown", "markdown_edit", "markdown_append", "docs_create", "media_upload", "workspaces"]) mentions("stuga-propose-edits", tool);
+  for (const action of [...CONTRACT_TOOLS.markdown, ...CONTRACT_TOOLS.markdown_edit, ...CONTRACT_TOOLS.media_upload]) {
+    usesAction("stuga-propose-edits", action);
   }
-  for (const action of ["list", "schema", "status", "create_database", "create_table", "add_column", "insert_rows", "update_rows", "delete_rows"]) {
-    assert.match(byName["stuga-databases"], new RegExp(`"${action}"`), `databases action ${action}`);
+
+  for (const tool of ["databases", "databases_add", "databases_change", "query"]) mentions("stuga-databases", tool);
+  for (const action of [...CONTRACT_TOOLS.databases, ...CONTRACT_TOOLS.databases_add, ...CONTRACT_TOOLS.databases_change]) {
+    usesAction("stuga-databases", action);
   }
+
+  for (const tool of ["search", "retrieve", "docs", "markdown", "collections", "folders", "events", "workspaces"]) mentions("stuga-research", tool);
+  assert.match(byName["stuga-research"], /`workspace_ids`/);
+  assert.match(byName["stuga-research"], /\["\*"\]/);
   for (const type of ["doc.created", "run.proposed", "run.decided", "comment.added", "database.changed"]) {
     assert.match(byName["stuga-research"], new RegExp(type.replace(".", "\\.")), `event type ${type}`);
+  }
+});
+
+test("the section and the skills name only the tools and actions Stuga ships", async () => {
+  const skills = await plugin.loadBundledSkills(path.join(ROOT, "skills"));
+  const texts = [["section", plugin.sectionText({ url: "http://127.0.0.1:8787", serverName: "stuga" })], ...skills.map((s) => [s.name, s.content])];
+  for (const [label, text] of texts) {
+    const { tools, actions } = namedToolsAndActions(text);
+    for (const tool of tools) assert.ok(tool in CONTRACT_TOOLS, `${label} names unknown tool ${tool}`);
+    for (const action of actions) assert.ok(CONTRACT_ACTIONS.has(action), `${label} names unknown action ${action}`);
+    // No workspace is implied any more: every call names its own.
+    assert.doesNotMatch(text, /home workspace/i, `${label} mentions a home workspace`);
+    // Retired tools the patterns above cannot see: `media` is `media_upload`, `docs` create is `docs_create`.
+    assert.doesNotMatch(text, /`media`/, `${label} names the retired media tool`);
+    assert.doesNotMatch(text, /`docs`[^.\n]*action:? "create"/, `${label} creates through docs`);
   }
 });
 
@@ -138,62 +197,101 @@ test("cordis.patch.yml carries the two rows and the bundle manifest points at it
   assert.ok(pkg.files.includes("cordis.patch.yml"));
 });
 
-describe_instructions: {
-  test("fetchInstructions returns the workspace's conventions, and null on any failure", async () => {
+/** Run `body` with STUGA_API_KEY set and, when given, a stand-in for the global fetch. */
+async function withKeyAndFetch(fetchImpl, body) {
+  const previousKey = process.env.STUGA_API_KEY;
+  const previousFetch = globalThis.fetch;
+  process.env.STUGA_API_KEY = "vk_test";
+  if (fetchImpl) globalThis.fetch = fetchImpl;
+  try {
+    await body();
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STUGA_API_KEY;
+    else process.env.STUGA_API_KEY = previousKey;
+  }
+}
+
+const answering = (body) => async () => ({ ok: true, json: async () => body });
+
+describe_workspace: {
+  test("fetchWorkspace returns the key's workspace and its conventions, and null on any failure", async () => {
     const seen = [];
     const ok = async (url, init) => {
       seen.push({ url, headers: init.headers });
-      return { ok: true, json: async () => ({ instructions: "  House style: British spelling.  " }) };
+      return { ok: true, json: async () => ({ workspace_id: " ws_1 ", name: " Studio ", instructions: "  House style: British spelling.  " }) };
     };
-    assert.equal(
-      await plugin.fetchInstructions("https://notes.example.com/", "vk_key", ok),
-      "House style: British spelling.",
-    );
+    assert.deepEqual(await plugin.fetchWorkspace("https://notes.example.com/", "vk_key", ok), {
+      workspaceId: "ws_1",
+      name: "Studio",
+      instructions: "House style: British spelling.",
+    });
     assert.equal(seen[0].url, "https://notes.example.com/api/instructions");
     assert.equal(seen[0].headers.authorization, "Bearer vk_key");
 
-    // No key, a refusal, a blank answer and a thrown request all mean "no conventions".
-    assert.equal(await plugin.fetchInstructions("https://x.test", "", ok), null);
-    assert.equal(await plugin.fetchInstructions("https://x.test", "k", async () => ({ ok: false })), null);
+    // A workspace without conventions is still a workspace: its id is what routes the calls.
+    assert.deepEqual(await plugin.fetchWorkspace("https://x.test", "k", answering({ workspace_id: "ws_2", name: "Notes", instructions: "  " })), {
+      workspaceId: "ws_2",
+      name: "Notes",
+      instructions: "",
+    });
+
+    // No key, a refusal, an answer without a workspace and a thrown request all mean "not read".
+    assert.equal(await plugin.fetchWorkspace("https://x.test", "", ok), null);
+    assert.equal(await plugin.fetchWorkspace("https://x.test", "k", async () => ({ ok: false })), null);
+    assert.equal(await plugin.fetchWorkspace("https://x.test", "k", answering({ instructions: "No id." })), null);
     assert.equal(
-      await plugin.fetchInstructions("https://x.test", "k", async () => ({ ok: true, json: async () => ({ instructions: "  " }) })),
-      null,
-    );
-    assert.equal(
-      await plugin.fetchInstructions("https://x.test", "k", async () => {
+      await plugin.fetchWorkspace("https://x.test", "k", async () => {
         throw new Error("unreachable");
       }),
       null,
     );
   });
 
-  test("conventionsBlock is empty without conventions and labelled with them", () => {
-    assert.equal(plugin.conventionsBlock(null), "");
-    assert.equal(plugin.conventionsBlock(""), "");
-    const block = plugin.conventionsBlock("Never touch Archive.");
-    assert.match(block, /This workspace's conventions/);
+  test("workspaceBlock names the workspace, with its conventions or without", () => {
+    assert.equal(plugin.workspaceBlock(null), "");
+
+    const bare = plugin.workspaceBlock({ workspaceId: "ws_1", name: "Studio", instructions: "" });
+    assert.match(bare, /### The key's workspace/);
+    assert.match(bare, /minted in "Studio", `workspace_id` `ws_1`/);
+    assert.match(bare, /no conventions for agents/);
+
+    const block = plugin.workspaceBlock({ workspaceId: "ws_1", name: 'Line\n"two"', instructions: "Never touch Archive." });
+    assert.match(block, /minted in "Line\\n\\"two\\"", /, "a name stays on its one line");
+    assert.match(block, /Follow them when working in it/);
     assert.match(block, /Never touch Archive\./);
+
+    assert.match(plugin.workspaceBlock({ workspaceId: "ws_1", name: "", instructions: "" }), /minted in `workspace_id` `ws_1`/);
   });
 
-  test("apply fetches the conventions and folds them into the section text", async () => {
-    const previous = process.env.STUGA_API_KEY;
-    process.env.STUGA_API_KEY = "vk_test";
-    try {
+  test("apply without a reachable node leaves the section usable", async () => {
+    await withKeyAndFetch(null, async () => {
       const ctx = fakeCtx();
       plugin.apply(ctx, { url: "http://127.0.0.1:8799" });
       const [section] = ctx.sections;
-      // Before the fetch settles the section is still usable — just without conventions.
-      assert.doesNotMatch(section.text({}), /This workspace's conventions/);
       assert.equal(ctx.calls.effects.length, 1, "the refresh runs inside a disposable effect");
       await settle();
       // No node is listening on that port in a unit test, so the fetch fails and
       // the section must be unchanged rather than broken.
       assert.match(section.text({}), /"Proposed" is SUCCESS/);
+      assert.doesNotMatch(section.text({}), /The key's workspace/);
       for (const dispose of ctx.calls.effects) dispose();
-    } finally {
-      if (previous === undefined) delete process.env.STUGA_API_KEY;
-      else process.env.STUGA_API_KEY = previous;
-    }
+    });
+  });
+
+  test("apply folds the key's workspace into the section text", async () => {
+    await withKeyAndFetch(answering({ workspace_id: "ws_1", name: "Studio", instructions: "Notes go in Log/." }), async () => {
+      const ctx = fakeCtx();
+      plugin.apply(ctx, { url: "https://notes.example.com" });
+      const [section] = ctx.sections;
+      // Before the fetch settles the section is still usable — just without the workspace.
+      assert.doesNotMatch(section.text({}), /The key's workspace/);
+      await settle();
+      const text = section.text({});
+      assert.match(text, /`workspace_id` `ws_1`/);
+      assert.match(text, /Notes go in Log\/\./);
+      for (const dispose of ctx.calls.effects) dispose();
+    });
   });
 
   test("the conventions fetch can be switched off", () => {

@@ -1,7 +1,7 @@
 {
   "name": "@stuga/dsh-plugin",
-  "version": "0.1.0",
-  "description": "Connect a DeepSeek Harness profile to a Stuga workspace: Stuga's MCP tools, the workspace's conventions in the system prompt, and playbook skills for reviewed edits.",
+  "version": "0.2.0",
+  "description": "Connect a DeepSeek Harness profile to Stuga: its MCP tools, the key's workspace and its conventions in the system prompt, and playbook skills for reviewed edits.",
   "license": "MIT",
   "type": "module",
   "main": "index.js",
